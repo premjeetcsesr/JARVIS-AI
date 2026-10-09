@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import os
 import re
 import platform
@@ -581,6 +582,18 @@ class _BrowserSession:
         channel     = self._spec["channel"]
         engine_obj  = getattr(self._pw, engine_name)
 
+        # Check if Chrome / Chromium is already running with remote debugging (CDP)
+        if engine_name == "chromium":
+            try:
+                cdp_browser = await self._pw.chromium.connect_over_cdp("http://localhost:9222", timeout=1500)
+                if cdp_browser.contexts:
+                    self._context = cdp_browser.contexts[0]
+                    self._page = await self._adopt_page()
+                    print(f"[Browser] [+] Connected to active Chrome via CDP (localhost:9222)")
+                    return
+            except Exception:
+                pass
+
         if engine_name == "firefox":
             profile = _firefox_profile_dir() or str(
                 Path.home() / ".jarvis_profiles" / "firefox"
@@ -826,6 +839,36 @@ class _BrowserSession:
                 results.append(f"✗ {selector}: {e}")
         return "Form filled: " + ", ".join(results)
 
+    async def get_all_clickable_elements(self) -> list[dict]:
+        """Scans and returns all visible interactive elements (buttons, links, inputs)."""
+        page = await self._get_page()
+        js_code = """
+        () => {
+            const selectors = 'button, a, input[type="button"], input[type="submit"], [role="button"], [role="link"], [role="tab"], [role="menuitem"], div[role="button"], span[role="button"], [onclick]';
+            const nodes = Array.from(document.querySelectorAll(selectors));
+            const results = [];
+            for (let el of nodes) {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0') {
+                    const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || el.id || '').trim();
+                    if (text && text.length < 100) {
+                        results.push({
+                            tag: el.tagName.toLowerCase(),
+                            text: text.replace(/\\s+/g, ' '),
+                            role: el.getAttribute('role') || el.tagName.toLowerCase()
+                        });
+                    }
+                }
+            }
+            return results;
+        }
+        """
+        try:
+            return await page.evaluate(js_code)
+        except Exception:
+            return []
+
     async def smart_click(self, description: str) -> str:
         page = await self._get_page()
         raw_desc = (description or "").strip()
@@ -833,16 +876,17 @@ class _BrowserSession:
 
         # Clean Hindi/Hinglish phrasing
         clean_desc = re.sub(
-            r'\s*(?:par|pe|ko|bhi|sa)?\s*(?:click|press|karo|kar do|dabao|chalao|khol do)\s*$', 
+            r'\s*(?:par|pe|ko|bhi|sa)?\s*(?:click|press|karo|kar do|dabao|daba do|chalao|khol do|trigger|trigger karo)\s*$', 
             '', 
             desc_lower, 
             flags=re.IGNORECASE
         ).strip()
-        clean_desc = re.sub(r'^(?:browser|brouser)\s*(?:me|in|par)?\s*', '', clean_desc).strip()
+        clean_desc = re.sub(r'^(?:browser|brouser|chrome)\s*(?:me|in|par)?\s*', '', clean_desc).strip()
 
         generic_keywords = {
             "kisi button", "any button", "koi button", "button", "koi bhi button",
-            "koi sa button", "a button", "some button", "kisi bhi button", ""
+            "koi sa button", "a button", "some button", "kisi bhi button", "trigger",
+            "first button", "pehla button", "primary button", ""
         }
         if clean_desc in generic_keywords:
             # Generic click: click first visible button or interactive action element
@@ -895,6 +939,44 @@ class _BrowserSession:
                     return f"Clicked: '{name_candidate}'"
                 except Exception:
                     pass
+
+        # JavaScript DOM evaluate fallback for modern web apps & nested elements
+        try:
+            target_json = json.dumps(clean_desc or core_name or raw_desc)
+            js_click = f"""
+            () => {{
+                const target = {target_json}.toLowerCase();
+                const selectors = 'button, a, input[type="button"], input[type="submit"], [role="button"], [role="link"], [role="tab"], [role="menuitem"], div[role="button"], span[role="button"], [onclick], button *, a *';
+                const candidates = Array.from(document.querySelectorAll(selectors));
+                
+                // 1. Exact match
+                for (let el of candidates) {{
+                    const clickable = el.closest('button, a, [role="button"], input, [onclick]') || el;
+                    const text = (clickable.innerText || clickable.value || clickable.getAttribute('aria-label') || clickable.getAttribute('title') || '').trim().toLowerCase();
+                    if (text === target) {{
+                        clickable.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                        clickable.click();
+                        return "exact";
+                    }}
+                }}
+                // 2. Substring match
+                for (let el of candidates) {{
+                    const clickable = el.closest('button, a, [role="button"], input, [onclick]') || el;
+                    const text = (clickable.innerText || clickable.value || clickable.getAttribute('aria-label') || clickable.getAttribute('title') || '').trim().toLowerCase();
+                    if (text && text.includes(target)) {{
+                        clickable.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                        clickable.click();
+                        return "contains";
+                    }}
+                }}
+                return null;
+            }}
+            """
+            js_res = await page.evaluate(js_click)
+            if js_res:
+                return f"Clicked element via DOM: '{clean_desc or raw_desc}'"
+        except Exception:
+            pass
 
         return f"Could not find element: '{description}'"
 
@@ -1178,14 +1260,13 @@ def browser_control(
         _log(player, result)
         return result
 
-    # ── Navigation is ALWAYS native ──────────────────────────────────────────
-    # go_to / search / new_tab open the site in the user's own browser --
-    # their own profile, logged-in accounts and start page; exactly as if the
-    # user had opened it themselves. A controlled window with about:blank never
-    # opens here. The only exception: if an automation flow is already running,
-    # navigation continues in that window (so multi-step tasks aren't split).
+    # ── Navigation ───────────────────────────────────────────────────────────
+    # If automated=True or control=True or an automated session already exists,
+    # open via Playwright so that all DOM elements and buttons can be clicked/inspected.
+    # Otherwise open natively in user's browser.
     if action in ("go_to", "search", "new_tab"):
-        if _registry.has(browser):
+        use_automation = params.get("automated") or params.get("control") or _registry.has(browser)
+        if use_automation:
             sess = _registry.get(browser)
             try:
                 if action == "search":
@@ -1215,14 +1296,41 @@ def browser_control(
         _log(player, result)
         return result
 
-    # ── Interactive actions (click/type/scroll/fill/read...) ───────────────────
-    # If an automated session is already running, we prioritize Playwright.
-    # If no automated session is active, or if Playwright cannot locate the target,
-    # we seamlessly use desktop automation (AI screen vision + mouse/keyboard).
-    # This guarantees that clicks, typing, input filling, and scrolling work
-    # on ANY webpage open on the user's screen.
+    # ── Interactive actions (click/type/scroll/fill/read/scan...) ─────────────
+    # Auto-detect if Chrome is running with remote debugging port (CDP)
+    if not _registry.has(browser):
+        try:
+            import urllib.request
+            req = urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=0.3)
+            if req.status == 200:
+                _registry._get_or_create(browser or "chrome")
+        except Exception:
+            pass
 
     has_active_sess = _registry.has(browser)
+
+    if action in ("scan_elements", "list_elements", "get_elements", "list_buttons", "show_buttons"):
+        if has_active_sess:
+            try:
+                sess = _registry.get(browser)
+                elements = sess.run(sess.get_all_clickable_elements())
+                if elements:
+                    texts = [e["text"] for e in elements if e.get("text")]
+                    unique_texts = list(dict.fromkeys(texts))[:15]
+                    result = f"Visible buttons & elements on page ({len(unique_texts)}): " + ", ".join(f"'{t}'" for t in unique_texts)
+                    _log(player, result)
+                    return result
+                result = "No visible clickable elements detected on current page."
+                _log(player, result)
+                return result
+            except Exception as e:
+                result = f"Error scanning elements: {e}"
+                _log(player, result)
+                return result
+
+        result = "Page is open in regular browser. I can click any visible button via screen vision, or open in automated browser to inspect full DOM tree."
+        _log(player, result)
+        return result
 
     if action == "scroll":
         result_parts = []
@@ -1380,7 +1488,11 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_field | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
+                "description": "go_to | search | click | type | scroll | fill_field | fill_form | smart_click | smart_type | scan_elements | list_elements | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
+            },
+            "automated": {
+                "type": "BOOLEAN",
+                "description": "Set true when opening websites to give JARVIS direct DOM element inspection and button trigger capabilities"
             },
             "browser": {
                 "type": "STRING",

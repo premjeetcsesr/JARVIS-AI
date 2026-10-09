@@ -104,6 +104,9 @@ def _find_title(target: str):
 def close_application(parameters=None, player=None, speak=None, **_kwargs) -> str:
     params = parameters or {}
     target = str(params.get("target") or params.get("application") or "").strip().lower()
+    import re
+    target = re.sub(r'\s*(?:band karo|band kar do|hata do|hatao|close karo|rok do)\s*$', '', target, flags=re.IGNORECASE).strip()
+    target = re.sub(r'^(?:kripya|please)\s*', '', target, flags=re.IGNORECASE).strip()
     if not target:
         return "Please specify what should be closed."
 

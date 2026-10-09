@@ -317,25 +317,92 @@ def _focus_window(title: str) -> str:
 
     return f"focus_window: unknown OS '{os_name}'"
 
+def _grab_screenshot_gdi():
+    """Ultra-reliable and fast Windows GDI screen capture using ctypes."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        from PIL import Image
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:
+            pass
+        w = user32.GetSystemMetrics(0)
+        h = user32.GetSystemMetrics(1)
+        if w <= 0 or h <= 0:
+            return None
+
+        hdc_screen = user32.GetDC(0)
+        hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+        hbmp = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
+        old_bmp = gdi32.SelectObject(hdc_mem, hbmp)
+
+        ret = gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, 0, 0, 0x00CC0020 | 0x40000000)
+        if not ret:
+            gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, 0, 0, 0x00CC0020)
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ('biSize', wintypes.DWORD),
+                ('biWidth', wintypes.LONG),
+                ('biHeight', wintypes.LONG),
+                ('biPlanes', wintypes.WORD),
+                ('biBitCount', wintypes.WORD),
+                ('biCompression', wintypes.DWORD),
+                ('biSizeImage', wintypes.DWORD),
+                ('biXPelsPerMeter', wintypes.LONG),
+                ('biYPelsPerMeter', wintypes.LONG),
+                ('biClrUsed', wintypes.DWORD),
+                ('biClrImportant', wintypes.DWORD)
+            ]
+
+        bmi = BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.biWidth = w
+        bmi.biHeight = -h
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = 0
+
+        buf = ctypes.create_string_buffer(w * h * 4)
+        gdi32.GetDIBits(hdc_mem, hbmp, 0, h, buf, ctypes.byref(bmi), 0)
+        img = Image.frombuffer('RGBA', (w, h), buf, 'raw', 'BGRA', 0, 1)
+
+        gdi32.SelectObject(hdc_mem, old_bmp)
+        gdi32.DeleteObject(hbmp)
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(0, hdc_screen)
+        return img
+    except Exception as e:
+        return None
+
 def _grab_screenshot():
     """
     Captures the screen with multiple fallback backends:
-    1. mss (fastest and most reliable multi-monitor support)
-    2. PIL ImageGrab
-    3. pyautogui.screenshot()
+    1. Native Windows GDI (BitBlt) on Windows (fastest, never fails)
+    2. mss (multi-monitor support)
+    3. PIL ImageGrab
+    4. pyautogui.screenshot()
     Returns a PIL.Image object, or None if all backends fail.
     """
     img = None
-    try:
-        import mss
-        with mss.mss() as sct:
-            monitors = sct.monitors
-            target = monitors[1] if len(monitors) > 1 else monitors[0]
-            shot = sct.grab(target)
-            from PIL import Image
-            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-    except Exception as e:
-        pass
+    if platform.system() == "Windows":
+        img = _grab_screenshot_gdi()
+
+    if img is None:
+        try:
+            import mss
+            with mss.mss() as sct:
+                monitors = sct.monitors
+                target = monitors[1] if len(monitors) > 1 else monitors[0]
+                shot = sct.grab(target)
+                from PIL import Image
+                img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        except Exception:
+            pass
 
     if img is None:
         try:
@@ -357,7 +424,7 @@ def _grab_screenshot():
 def _screen_find(description: str) -> tuple[int, int] | None:
     api_key = _get_api_key()
     if not api_key:
-        print("[ComputerControl] ⚠️ No API key for screen_find")
+        print("[ComputerControl] [!] No API key for screen_find")
         return None
 
     try:
@@ -370,7 +437,7 @@ def _screen_find(description: str) -> tuple[int, int] | None:
 
         img = _grab_screenshot()
         if img is None:
-            print("[ComputerControl] ⚠️ Failed to capture screen using all available methods.")
+            print("[ComputerControl] [!] Failed to capture screen using all available methods.")
             return None
 
         img_w, img_h = img.size
@@ -394,31 +461,31 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         desc_lower = raw_desc.lower()
 
         clean_desc = re.sub(
-            r'\s*(?:par|pe|ko|bhi|sa)?\s*(?:click|press|karo|kar do|dabao|chalao|khol do)\s*$',
+            r'\s*(?:par|pe|ko|bhi|sa)?\s*(?:click|press|karo|kar do|dabao|chalao|khol do|trigger karo)\s*$',
             '',
             desc_lower,
             flags=re.IGNORECASE
         ).strip()
-        clean_desc = re.sub(r'^(?:browser|brouser)\s*(?:me|in|par)?\s*', '', clean_desc).strip()
+        clean_desc = re.sub(r'^(?:browser|brouser|chrome)\s*(?:me|in|par)?\s*', '', clean_desc).strip()
 
         generic_button_keywords = {
             "kisi button", "any button", "koi button", "button", "koi bhi button",
-            "koi sa button", "a button", "some button", "kisi bhi button", ""
+            "koi sa button", "a button", "some button", "kisi bhi button", "trigger", ""
         }
         is_generic = clean_desc in generic_button_keywords
 
         if is_generic:
             prompt = (
-                f"This is a {curr_w}×{curr_h} screenshot of the computer screen. "
-                f"Locate the most prominent or primary clickable action button on the active window or page "
-                f"(such as the main action button, submit button, search button, play button, login button, or primary interactive button). "
+                f"This is a {curr_w}x{curr_h} screenshot of the computer screen. "
+                f"Locate the most prominent or primary clickable action button or interactive control on the active window or webpage "
+                f"(such as the primary CTA button, submit button, search button, play button, login button, or first interactive button). "
                 f"Reply with ONLY its center coordinates in pixel format: x,y "
                 f"Example: 640,360\n"
                 f"If absolutely no button is visible, reply: NOT_FOUND"
             )
         else:
             prompt = (
-                f"This is a {curr_w}×{curr_h} screenshot of the computer screen. "
+                f"This is a {curr_w}x{curr_h} screenshot of the computer screen. "
                 f"Locate the UI element or button described as: '{clean_desc}'. "
                 f"Reply with ONLY its center coordinates in pixel format: x,y "
                 f"Example: 640,360\n"
@@ -428,7 +495,13 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         from core import gemini
         cl = gemini.client(timeout_ms=25_000, key=api_key)
 
-        models_to_try = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"]
+        models_to_try = [
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.8-flash",
+            "gemini-flash-lite-latest",
+            "gemini-2.5-flash"
+        ]
         text = ""
         for model_name in models_to_try:
             try:
@@ -445,7 +518,10 @@ def _screen_find(description: str) -> tuple[int, int] | None:
                         text = candidate
                         break
             except Exception as e:
-                print(f"[ComputerControl] Model {model_name} failed: {e}")
+                err_str = str(e)
+                if "429" in err_str or "quota" in err_str.lower():
+                    continue
+                print(f"[ComputerControl] Model {model_name} attempt: {e}")
 
         if not text or "NOT_FOUND" in text.upper():
             print(f"[ComputerControl] Element '{description}' not found on screen.")

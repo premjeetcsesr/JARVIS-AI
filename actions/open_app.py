@@ -67,15 +67,18 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
 
 def _normalize(raw: str) -> str:
     key = raw.lower().strip()
+    import re
+    key = re.sub(r'\s*(?:kholo|khol do|chalu karo|start karo|open karo|chalao|kholiye)\s*$', '', key, flags=re.IGNORECASE).strip()
+    key = re.sub(r'^(?:kripya|please)\s*', '', key, flags=re.IGNORECASE).strip()
 
     if key in _APP_ALIASES:
-        return _APP_ALIASES[key].get(_SYSTEM, raw)
+        return _APP_ALIASES[key].get(_SYSTEM, key)
 
     for alias_key, os_map in _APP_ALIASES.items():
         if alias_key in key or key in alias_key:
-            return os_map.get(_SYSTEM, raw)
+            return os_map.get(_SYSTEM, key)
 
-    return raw  
+    return key  
 
 def _launch_windows(app_name: str) -> bool:
 
@@ -254,6 +257,21 @@ def open_app(
 
     normalized = _normalize(app_name)
     print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")
+
+    # Smart Mobile Mode routing: If mobile mode is active, open on phone
+    try:
+        from memory.config_manager import get_mobile_mode_enabled
+        if get_mobile_mode_enabled():
+            from actions.mobile_control import open_mobile_app, _ensure_connected
+            conn, dev = _ensure_connected()
+            if conn:
+                print(f"[open_app] 📱 Mobile Mode active — opening '{app_name}' on mobile phone ({dev})")
+                res = open_mobile_app(app_name)
+                if player:
+                    player.write_log(f"[open_app:mobile] {app_name}")
+                return res
+    except Exception as e:
+        print(f"[open_app] Mobile route check: {e}")
 
     if player:
         player.write_log(f"[open_app] {app_name}")

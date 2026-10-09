@@ -392,3 +392,22 @@ def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
     plugins_cfg[plugin_name] = enabled
     data["plugins_enabled"] = plugins_cfg
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+
+def get_mobile_mode_enabled() -> bool:
+    """Return whether voice commands should be routed to mobile phone."""
+    cfg = load_api_keys()
+    return bool(cfg.get("mobile_mode_enabled", False))
+
+
+def save_mobile_mode_enabled(enabled: bool) -> None:
+    """Persist mobile mode state."""
+    ensure_config_dir()
+    data: dict = {}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data["mobile_mode_enabled"] = bool(enabled)
+    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")

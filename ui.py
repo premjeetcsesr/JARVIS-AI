@@ -28,7 +28,7 @@ from PyQt6.QtGui import (
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
@@ -2916,6 +2916,289 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+class MobileControlOverlay(_HudOverlay):
+    """Floating overlay — Connect and control Android smartphone via Wireless ADB."""
+
+    _OW = 440
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            MobileControlOverlay {{
+                background: rgba(0, 6, 12, 0.96);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 8px;
+            }}
+        """)
+        self.setFixedWidth(self._OW)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 14)
+        lay.setSpacing(8)
+
+        # Header
+        hdr_row = QHBoxLayout()
+        hdr = QLabel("📱  MOBILE CONTROLLER (ADB)")
+        hdr.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr_row.addWidget(hdr)
+        hdr_row.addStretch()
+
+        x_btn = QPushButton("✕")
+        x_btn.setFixedSize(24, 24)
+        x_btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        x_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        x_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_DIM}; border: none; }}
+            QPushButton:hover {{ color: {C.RED}; }}
+        """)
+        x_btn.clicked.connect(self.hide)
+        hdr_row.addWidget(x_btn)
+        lay.addLayout(hdr_row)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
+        lay.addWidget(sep)
+
+        # Mobile System ON/OFF Toggle
+        self._mode_btn = QPushButton()
+        self._mode_btn.setFixedHeight(32)
+        self._mode_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mode_btn.clicked.connect(self._toggle_mode)
+        lay.addWidget(self._mode_btn)
+        self._update_mode_ui()
+
+        # IP input label
+        cap = QLabel("PHONE IP & PORT:")
+        cap.setFont(QFont("Courier New", 8))
+        cap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(cap)
+
+        # IP input row
+        ip_row = QHBoxLayout()
+        ip_row.setSpacing(6)
+
+        self._ip_box = QLineEdit()
+        self._ip_box.setFont(QFont("Courier New", 9))
+        self._ip_box.setFixedHeight(30)
+        self._ip_box.setPlaceholderText("e.g. 10.190.62.50:5555")
+        self._ip_box.setStyleSheet(f"""
+            QLineEdit {{
+                background: #000d14; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 4px;
+                padding: 4px 8px;
+            }}
+            QLineEdit:focus {{ border-color: {C.PRI}; }}
+        """)
+        ip_row.addWidget(self._ip_box, stretch=1)
+
+        self._conn_btn = QPushButton("CONNECT")
+        self._conn_btn.setFixedHeight(30)
+        self._conn_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._conn_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._conn_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: #0d2e20; color: {C.GREEN};
+                border: 1px solid {C.GREEN_D}; border-radius: 4px;
+                padding: 4px 10px;
+            }}
+            QPushButton:hover {{ background: #13422e; border-color: {C.GREEN}; }}
+        """)
+        self._conn_btn.clicked.connect(self._on_connect_clicked)
+        ip_row.addWidget(self._conn_btn)
+        lay.addLayout(ip_row)
+
+        # Status label
+        self._status_lbl = QLabel("Checking connection...")
+        self._status_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._status_lbl.setStyleSheet(f"color: {C.MUTED_C}; background: transparent;")
+        self._status_lbl.setWordWrap(True)
+        lay.addWidget(self._status_lbl)
+
+        # Actions header
+        act_hdr = QLabel("◈ QUICK ACTIONS")
+        act_hdr.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        act_hdr.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent; margin-top: 4px;")
+        lay.addWidget(act_hdr)
+
+        # Quick action buttons grid
+        grid = QGridLayout()
+        grid.setSpacing(6)
+
+        btn_css = f"""
+            QPushButton {{
+                background: {C.PANEL}; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 4px;
+                padding: 5px; font-family: 'Courier New'; font-size: 8pt;
+            }}
+            QPushButton:hover {{
+                background: {C.PRI_GHO}; color: {C.PRI}; border-color: {C.PRI_DIM};
+            }}
+        """
+
+        actions = [
+            ("💬 WHATSAPP",    lambda: self._call_action("open_app", "whatsapp")),
+            ("▶ YOUTUBE",     lambda: self._call_action("open_app", "youtube")),
+            ("🔒 LOCK SCREEN", lambda: self._call_action("lock")),
+            ("🔓 UNLOCK",      lambda: self._call_action("unlock")),
+            ("📸 SCREENSHOT",  lambda: self._call_action("screenshot")),
+            ("📷 CAMERA",      lambda: self._call_action("open_app", "camera")),
+            ("⬆ SCROLL UP",   lambda: self._call_action("scroll_up")),
+            ("⬇ SCROLL DOWN", lambda: self._call_action("scroll_down")),
+            ("🏠 HOME",        lambda: self._call_action("home")),
+            ("🔙 BACK",        lambda: self._call_action("back")),
+            ("🔊 VOL UP",      lambda: self._call_action("volume_up")),
+            ("🔉 VOL DOWN",    lambda: self._call_action("volume_down")),
+        ]
+
+        r, c = 0, 0
+        for title, fn in actions:
+            b = QPushButton(title)
+            b.setFixedHeight(28)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(btn_css)
+            b.clicked.connect(fn)
+            grid.addWidget(b, r, c)
+            c += 1
+            if c > 1:
+                c = 0
+                r += 1
+        lay.addLayout(grid)
+
+        # Result info label
+        self._info_lbl = QLabel("")
+        self._info_lbl.setFont(QFont("Courier New", 7))
+        self._info_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(self._info_lbl)
+
+        # Bottom dismiss row
+        bot_row = QHBoxLayout()
+        bot_row.addStretch()
+        dis_btn = QPushButton("CLOSE")
+        dis_btn.setFixedHeight(28)
+        dis_btn.setFont(QFont("Courier New", 8))
+        dis_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        dis_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 4px; padding: 2px 14px;
+            }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        dis_btn.clicked.connect(self.hide)
+        bot_row.addWidget(dis_btn)
+        lay.addLayout(bot_row)
+
+        self._load_cached_ip()
+        QTimer.singleShot(50, self._check_status)
+
+    def _load_cached_ip(self):
+        try:
+            cache_file = Path(__file__).resolve().parent / "data" / "last_mobile_ip.txt"
+            if cache_file.exists():
+                self._ip_box.setText(cache_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            pass
+
+    def _check_status(self):
+        try:
+            from actions.mobile_control import get_phone_status
+            st = get_phone_status()
+            if "Phone connected hai" in st:
+                self._status_lbl.setText(f"🟢 {st}")
+                self._status_lbl.setStyleSheet(f"color: {C.GREEN}; font-weight: bold;")
+            else:
+                self._status_lbl.setText("🔴 STATUS: Disconnected")
+                self._status_lbl.setStyleSheet(f"color: {C.RED}; font-weight: bold;")
+        except Exception as e:
+            self._status_lbl.setText(f"⚪ STATUS: {e}")
+
+    def _on_connect_clicked(self):
+        ip = self._ip_box.text().strip()
+        if not ip:
+            self._status_lbl.setText("⚠ Please enter Phone IP & Port!")
+            self._status_lbl.setStyleSheet(f"color: {C.ACC}; font-weight: bold;")
+            return
+        self._status_lbl.setText("⏳ Connecting to " + ip + "...")
+        self._status_lbl.setStyleSheet(f"color: {C.PRI}; font-weight: bold;")
+        self._conn_btn.setEnabled(False)
+        QTimer.singleShot(100, lambda: self._do_connect(ip))
+
+    def _do_connect(self, ip: str):
+        try:
+            from actions.mobile_control import connect_phone
+            res = connect_phone(ip)
+            self._info_lbl.setText(res[:50])
+            self._check_status()
+        finally:
+            self._conn_btn.setEnabled(True)
+
+    def _toggle_mode(self):
+        try:
+            from memory.config_manager import get_mobile_mode_enabled, save_mobile_mode_enabled
+            new_val = not get_mobile_mode_enabled()
+            save_mobile_mode_enabled(new_val)
+            self._update_mode_ui()
+            win = self.window()
+            if win and hasattr(win, '_update_mobile_mode_btn'):
+                win._update_mobile_mode_btn(new_val)
+            if new_val:
+                self._info_lbl.setText("ℹ Mobile System ON — bolne par phone control hoga.")
+                self._info_lbl.setStyleSheet(f"color: {C.GREEN};")
+            else:
+                self._info_lbl.setText("ℹ Mobile System OFF — bolne par PC control hoga.")
+                self._info_lbl.setStyleSheet(f"color: {C.TEXT_DIM};")
+        except Exception as e:
+            self._info_lbl.setText(f"❌ {e}")
+
+    def _update_mode_ui(self):
+        try:
+            from memory.config_manager import get_mobile_mode_enabled
+            on = get_mobile_mode_enabled()
+        except Exception:
+            on = False
+        if on:
+            self._mode_btn.setText("⚡  MOBILE SYSTEM: ON  (Voice → Phone)")
+            self._mode_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #002414; color: {C.GREEN};
+                    border: 2px solid {C.GREEN}; border-radius: 4px;
+                    padding: 4px 10px; font-weight: bold;
+                }}
+                QPushButton:hover {{ background: #00331c; }}
+            """)
+        else:
+            self._mode_btn.setText("⚪  MOBILE SYSTEM: OFF (Voice → PC)")
+            self._mode_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #140d21; color: {C.TEXT_MED};
+                    border: 1px solid {C.BORDER}; border-radius: 4px;
+                    padding: 4px 10px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+            """)
+
+    def _call_action(self, action: str, target: str = ""):
+        try:
+            from actions.mobile_control import mobile_control, _ensure_connected, connect_phone
+            conn, _ = _ensure_connected()
+            if not conn:
+                ip = self._ip_box.text().strip()
+                if ip:
+                    self._status_lbl.setText("⏳ Auto-connecting to phone...")
+                    self._status_lbl.setStyleSheet(f"color: {C.PRI};")
+                    connect_phone(ip)
+                    self._check_status()
+            res = mobile_control({"action": action, "target": target})
+            self._info_lbl.setText(f"ℹ {res[:55]}")
+            self._info_lbl.setStyleSheet(f"color: {C.PRI_DIM};")
+        except Exception as e:
+            self._info_lbl.setText(f"❌ {e}")
+            self._info_lbl.setStyleSheet(f"color: {C.RED};")
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -3064,6 +3347,8 @@ class MainWindow(QMainWindow):
         self._update_autostart_btn(self._check_autostart())
         from memory.config_manager import get_brief_enabled as _gbe
         self._update_brief_btn(_gbe())
+        from memory.config_manager import get_mobile_mode_enabled as _gmme
+        self._update_mobile_mode_btn(_gmme())
 
         self._clock_tmr = QTimer(self)
         self._clock_tmr.timeout.connect(self._tick_clock)
@@ -3886,6 +4171,21 @@ class MainWindow(QMainWindow):
         remote_btn.clicked.connect(self._open_remote)
         lay.addWidget(remote_btn)
 
+        mobile_btn = QPushButton("📱  CONNECT MOBILE")
+        mobile_btn.setFixedHeight(30)
+        mobile_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        mobile_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        mobile_btn.setStyleSheet(_BTN_STYLE_PRI)
+        mobile_btn.clicked.connect(self._open_mobile_controller)
+        lay.addWidget(mobile_btn)
+
+        self._mobile_mode_btn = QPushButton()
+        self._mobile_mode_btn.setFixedHeight(26)
+        self._mobile_mode_btn.setFont(QFont("Courier New", 7))
+        self._mobile_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mobile_mode_btn.clicked.connect(self._toggle_mobile_mode)
+        lay.addWidget(self._mobile_mode_btn)
+
         fs_btn = QPushButton("⛶  FULLSCREEN  [F11]")
         fs_btn.setFixedHeight(26)
         fs_btn.setFont(QFont("Courier New", 7))
@@ -4682,6 +4982,43 @@ class MainWindow(QMainWindow):
         save_brief_enabled(new_val)
         self._update_brief_btn(new_val)
 
+    def _toggle_mobile_mode(self):
+        try:
+            from memory.config_manager import get_mobile_mode_enabled, save_mobile_mode_enabled
+            new_val = not get_mobile_mode_enabled()
+            save_mobile_mode_enabled(new_val)
+            self._update_mobile_mode_btn(new_val)
+            if hasattr(self, '_mobile_overlay') and self._mobile_overlay:
+                self._mobile_overlay._update_mode_ui()
+            status_txt = "ON (Voice commands control phone)" if new_val else "OFF (Voice commands control PC)"
+            self._log.append_log(f"SYS: Mobile System mode {status_txt}.")
+        except Exception as e:
+            self._log.append_log(f"ERR: Mobile mode toggle failed — {e}")
+
+    def _update_mobile_mode_btn(self, enabled: bool):
+        if not hasattr(self, '_mobile_mode_btn'):
+            return
+        if enabled:
+            self._mobile_mode_btn.setText("⚡  MOBILE SYSTEM: ON")
+            self._mobile_mode_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001f11; color: {C.GREEN};
+                    border: 1px solid {C.GREEN}; border-radius: 3px;
+                    text-align: left; padding: 0 8px; font-weight: bold;
+                }}
+                QPushButton:hover {{ background: #002e1a; }}
+            """)
+        else:
+            self._mobile_mode_btn.setText("📱  MOBILE SYSTEM: OFF")
+            self._mobile_mode_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+            """)
+
     # ── Wake word settings ───────────────────────────────────────────────────
 
     def _wake_state(self) -> dict:
@@ -5016,6 +5353,13 @@ class MainWindow(QMainWindow):
         )
         ov.show()
         ov.raise_()
+
+    # ── Mobile Control ───────────────────────────────────────────────────────
+
+    def _open_mobile_controller(self):
+        ov = MobileControlOverlay(parent=self.centralWidget())
+        self._centre_overlay(ov)
+        self._mobile_overlay = ov
 
     # ── Audio devices ────────────────────────────────────────────────────────
 
